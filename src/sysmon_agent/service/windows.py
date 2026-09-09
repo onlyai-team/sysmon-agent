@@ -27,13 +27,37 @@ _SERVICE_CLASS = "sysmon_agent.winservice.SysmonAgentService"
 _FAILURE_ACTIONS = "restart/5000/restart/10000/restart/30000"
 
 
-def has_pywin32() -> bool:
+def pywin32_error() -> Optional[str]:
+    """None when pywin32 is usable, otherwise why it is not.
+
+    An installed pywin32 still fails to import when its post-install step never
+    ran, because pywintypes cannot find its DLLs. That is a different problem
+    from a missing package and needs a different fix, so report the real error.
+    """
     try:
         import win32serviceutil  # noqa: F401
         import win32service  # noqa: F401
-        return True
-    except Exception:
-        return False
+        import servicemanager  # noqa: F401
+        return None
+    except ImportError as exc:
+        return str(exc)
+    except Exception as exc:
+        return "%s: %s" % (type(exc).__name__, exc)
+
+
+def has_pywin32() -> bool:
+    return pywin32_error() is None
+
+
+def pywin32_hint(error: str) -> str:
+    """Turn the import error into the command that fixes it."""
+    python = str(Path(sys.executable).with_name("python.exe"))
+    postinstall = str(Path(sys.executable).parent / "pywin32_postinstall.py")
+    if "pywintypes" in error or "DLL" in error:
+        return ('pywin32 is installed but its post-install step never ran. Fix it with:'
+                '\n    "%s" "%s" -install' % (python, postinstall))
+    return ('Install it into the agent environment with:'
+            '\n    uv pip install --python "%s" pywin32' % python)
 
 
 # ---------------------------------------------------------------- real service
@@ -198,11 +222,15 @@ def available() -> bool:
 
 
 def install() -> None:
-    if has_pywin32():
+    error = pywin32_error()
+    if error is None:
         LOG.info("Installing Windows service via pywin32")
         _install_service()
         return
-    LOG.warning("pywin32 is not installed; falling back to a SYSTEM scheduled task.")
+    LOG.warning("Cannot use a Windows service: %s", error)
+    LOG.warning("%s", pywin32_hint(error))
+    LOG.warning("Falling back to a SYSTEM scheduled task, which starts at boot "
+                "and restarts on failure.")
     _install_task()
 
 

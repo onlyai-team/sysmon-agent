@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import socket
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .paths import IS_WINDOWS, config_dir, config_file
+from .paths import IS_WINDOWS, config_file
 from .util import AgentError, run
+
+_LOG = logging.getLogger("sysmon.config")
 
 AUTH_NONE = "none"
 AUTH_BEARER = "bearer"
@@ -133,15 +136,27 @@ class Config:
 
 
 def _restrict_permissions(target: Path) -> None:
-    """Best-effort lock-down: the file holds collector credentials."""
-    try:
-        if IS_WINDOWS:
-            run(["icacls", str(target), "/inheritance:r",
-                 "/grant:r", "SYSTEM:F", "/grant:r", "Administrators:F"])
-            run(["icacls", str(config_dir()), "/inheritance:r",
-                 "/grant:r", "SYSTEM:F", "/grant:r", "Administrators:F"])
-        else:
+    """Lock down the config FILE; it holds collector credentials.
+
+    Only the file. The directory is deliberately left alone: on Windows it also
+    holds the agent's virtual environment, and stripping inheritance there once
+    locked Administrators out of the whole install.
+    """
+    if not IS_WINDOWS:
+        try:
             os.chmod(str(target), 0o600)
-            os.chmod(str(config_dir()), 0o750)
-    except Exception:
-        pass
+        except OSError as exc:
+            _LOG.warning("Could not chmod %s: %s", target, exc)
+        return
+
+    # Well-known SIDs, because the group names are localised: S-1-5-18 is
+    # LocalSystem and S-1-5-32-544 is the built-in Administrators group.
+    result = run(["icacls", str(target), "/inheritance:r",
+                  "/grant:r", "*S-1-5-18:F", "/grant:r", "*S-1-5-32-544:F"])
+    if result.returncode != 0:
+        # Put inheritance back rather than leave a file nobody can open.
+        run(["icacls", str(target), "/inheritance:e"])
+        _LOG.warning(
+            "Could not restrict permissions on %s (icacls: %s). The file keeps "
+            "its inherited permissions; review who can read it.",
+            target, (result.stderr or result.stdout).strip()[:200])

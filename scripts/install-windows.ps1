@@ -40,15 +40,32 @@ Write-Host "Creating the virtual environment at $venv"
 & $uv venv --python 3.11 $venv
 & $uv pip install --python (Join-Path $venv 'Scripts\python.exe') $sourceDir
 
-# pip does not run pywin32's post-install step, and without it the service
-# host cannot load pywintypes. Harmless to repeat; only a warning if it fails.
+$venvPython = Join-Path $venv 'Scripts\python.exe'
+
+# A real Windows service needs pywin32. pip installs the package but never runs
+# its post-install step, and without that step pywintypes cannot find its DLLs.
+function Test-Pywin32 {
+    & $venvPython -c "import win32serviceutil, servicemanager" 2>&1 | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
+
+if (-not (Test-Pywin32)) {
+    Write-Host 'Installing pywin32'
+    & $uv pip install --python $venvPython pywin32
+}
+
 $postInstall = Join-Path $venv 'Scripts\pywin32_postinstall.py'
 if (Test-Path $postInstall) {
     Write-Host 'Registering pywin32 service support'
-    & (Join-Path $venv 'Scripts\python.exe') $postInstall -install -quiet
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning 'pywin32 post-install failed; the installer will fall back to a scheduled task.'
-    }
+    & $venvPython $postInstall -install -quiet
+}
+
+if (Test-Pywin32) {
+    Write-Host 'pywin32 is ready; installing as a Windows service.'
+} else {
+    Write-Warning 'pywin32 is still unusable. Reason:'
+    & $venvPython -c "import win32serviceutil, servicemanager"
+    Write-Warning 'The agent will be installed as a SYSTEM scheduled task instead.'
 }
 
 $agent = Join-Path $venv 'Scripts\sysmon-agent.exe'

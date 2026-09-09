@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from sysmon_agent import config as config_module
+from sysmon_agent import util
 from sysmon_agent.config import Config
 from sysmon_agent.util import AgentError
 
@@ -120,6 +122,66 @@ class PersistenceTests(unittest.TestCase):
             with self.assertRaises(AgentError) as caught:
                 Config.load(Path(directory) / "absent.json")
             self.assertIn("install", str(caught.exception))
+
+
+class WindowsPermissionTests(unittest.TestCase):
+    """Regression: locking down the config directory once removed inherited
+    permissions from the whole install tree, including the venv, and left an
+    elevated Administrator unable to stat sysmon-agent.exe."""
+
+    def setUp(self):
+        self.calls = []
+        self.results = {}
+
+        class Result:
+            def __init__(self, returncode):
+                self.returncode = returncode
+                self.stdout = ""
+                self.stderr = "Access is denied."
+
+        def fake_run(cmd, **kwargs):
+            self.calls.append(list(cmd))
+            return Result(self.results.get(len(self.calls), 0))
+
+        self.patched = []
+        for name, value in (("IS_WINDOWS", True), ("run", fake_run)):
+            self.patched.append((name, getattr(config_module, name)))
+            setattr(config_module, name, value)
+
+    def tearDown(self):
+        for name, value in self.patched:
+            setattr(config_module, name, value)
+
+    def restrict(self, path=Path(r"C:\ProgramData\sysmon-agent\config.json")):
+        config_module._restrict_permissions(path)
+
+    def test_only_the_file_is_touched(self):
+        self.restrict()
+        for call in self.calls:
+            self.assertNotIn(r"C:\ProgramData\sysmon-agent", call)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_uses_well_known_sids_not_localised_names(self):
+        self.restrict()
+        icacls = " ".join(self.calls[0])
+        self.assertIn("*S-1-5-18:F", icacls)         # LocalSystem
+        self.assertIn("*S-1-5-32-544:F", icacls)     # built-in Administrators
+        self.assertNotIn("Administrators:F", icacls)
+
+    def test_failed_grant_restores_inheritance(self):
+        self.results = {1: 1}  # icacls fails
+        with self.assertLogs("sysmon.config", level="WARNING"):
+            self.restrict()
+        self.assertEqual(self.calls[1][-1], "/inheritance:e")
+
+
+class PathExistsTests(unittest.TestCase):
+    def test_permission_error_is_not_fatal(self):
+        class Denied:
+            def exists(self):
+                raise PermissionError(5, "Access is denied")
+
+        self.assertFalse(util.path_exists(Denied()))
 
 
 if __name__ == "__main__":

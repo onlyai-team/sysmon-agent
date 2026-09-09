@@ -54,17 +54,25 @@ def require_admin(action: str) -> None:
     raise AgentError("'%s' needs root. Re-run with sudo." % action)
 
 
+def path_exists(path: Path) -> bool:
+    """Path.exists() raises PermissionError on Windows when the ACL denies stat."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def console_script() -> Optional[Path]:
     """Locate the installed 'sysmon-agent' console script, if there is one."""
     argv0 = sys.argv[0] if sys.argv else ""
     if argv0:
         candidate = Path(argv0).resolve()
-        if candidate.exists() and candidate.stem.lower() == "sysmon-agent":
+        if candidate.stem.lower() == "sysmon-agent" and path_exists(candidate):
             return candidate
     bindir = Path(sys.executable).parent
     for name in ("sysmon-agent.exe", "sysmon-agent"):
         candidate = bindir / name
-        if candidate.exists():
+        if path_exists(candidate):
             return candidate.resolve()
     return None
 
