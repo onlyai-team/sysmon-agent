@@ -3,7 +3,8 @@
 A single-binary-style CLI that installs a background service on **Ubuntu** and
 **Windows**. The service samples CPU, memory, disk and network, records every
 login and logout session (SSH, RDP, VNC and local console), starts at boot,
-restarts after a crash, and pushes everything to an OTLP/HTTP collector.
+restarts after a crash, and pushes all three OTLP signals (metrics, logs and
+traces) to an OTLP/HTTP collector over HTTP.
 
 Built with `uv`. No agent-side database, no local dashboard: the collector is
 the destination.
@@ -63,6 +64,8 @@ Authentication schemes: `none`, `bearer`, `basic`, `header` (any custom header,
 for example `X-API-Key`).
 
 Other install flags: `--log-format json|text` (json is the default),
+`--no-traces` to export metrics and logs only, `--trace-polls` to span each
+session poll while debugging,
 `--no-per-cpu` to report host CPU totals instead of one series per core,
 `--environment`, `--attribute KEY=VALUE`, `--ca-bundle`, `--no-verify-tls`.
 
@@ -205,6 +208,31 @@ To alert on remote logins, match `event.name = session.start` and
 Pass `--log-format text` at install time if you would rather have prose lines;
 the body then reads `Login: ssh alice from 203.0.113.5 (session logind:47)` and
 the attributes are unchanged.
+
+### Traces (OTLP spans)
+
+Each login opens a span that closes at logout, so a trace backend shows one span
+per session with its real duration. The span name is `session <kind>`, for
+example `session ssh`, which keeps cardinality low; the user and client address
+are attributes, carrying the same keys the log record uses.
+
+Session logs are emitted inside their span, so every `session.start` and
+`session.end` record carries the trace id and span id. A log line in the alert
+links straight to the session span.
+
+Two things follow from spans only being exported when they end:
+
+- A login shows up in traces at **logout**, not at login. Alert on the logs, use
+  the traces to see how long sessions ran and which hosts they came from.
+- Sessions still open when the agent stops are ended with
+  `session.open_at_agent_stop = true` and carry no duration, since that end time
+  is a shutdown and not a logout.
+
+`--trace-polls` adds a `session.poll` span per poll, with a child `exec` span for
+every `loginctl`, `wevtutil` or `quser` call and the exit code. That is a
+debugging tool for a machine where session detection misbehaves; it is off by
+default because it produces a span every few seconds. `--no-traces` turns the
+signal off entirely.
 
 ### Resource attributes
 

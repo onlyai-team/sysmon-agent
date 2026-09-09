@@ -181,6 +181,10 @@ def _apply_common_flags(config: Config, args) -> None:
         config.per_cpu_metrics = False
     if getattr(args, "log_format", None):
         config.log_format = args.log_format
+    if getattr(args, "no_traces", False):
+        config.traces_enabled = False
+    if getattr(args, "trace_polls", False):
+        config.trace_polls = True
     if args.attribute:
         for pair in args.attribute:
             key, _, value = pair.partition("=")
@@ -207,7 +211,7 @@ def cmd_install(args) -> int:
     if not args.skip_check:
         print("\nChecking the collector...")
         ok, message = check_endpoint(config)
-        print("  %s %s" % ("OK:" if ok else "FAILED:", message))
+        print("  %s\n  %s" % ("OK" if ok else "FAILED", message))
         if not ok:
             if args.non_interactive:
                 raise AgentError(
@@ -428,7 +432,7 @@ def cmd_test(args) -> int:
     config = Config.load()
     config.validate()
     ok, message = check_endpoint(config)
-    print("%s %s" % ("OK:" if ok else "FAILED:", message))
+    print("%s\n  %s" % ("OK" if ok else "FAILED", message))
     return 0 if ok else 1
 
 
@@ -481,6 +485,11 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--log-format", choices=LOG_FORMATS,
                          help="json (default) writes one JSON object per event, "
                               "in the log file and in the exported log body")
+    install.add_argument("--no-traces", action="store_true",
+                         help="do not export spans, only metrics and logs")
+    install.add_argument("--trace-polls", action="store_true",
+                         help="also span every session poll and the commands it "
+                              "runs; useful for debugging, noisy otherwise")
     install.add_argument("--no-per-cpu", action="store_true",
                          help="report CPU metrics for the host only, not per core")
     install.add_argument("--ca-bundle", help="path to a custom CA bundle")

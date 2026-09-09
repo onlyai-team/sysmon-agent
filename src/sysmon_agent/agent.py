@@ -13,6 +13,7 @@ from .config import Config
 from .metrics import SystemMetrics
 from .sessions import build_tracker
 from .telemetry import Telemetry
+from .util import set_tracer
 
 LOG = logging.getLogger("sysmon.agent")
 EVENTS = logging.getLogger("sysmon.events")
@@ -46,6 +47,11 @@ class Agent:
         self.tracker = build_tracker(
             self.config.session_poll_seconds, on_event=self._on_session_event
         )
+        tracer = self.telemetry.tracer("sysmon.sessions")
+        self.tracker.set_tracing(tracer, self.config.trace_polls)
+        if tracer is not None and self.config.trace_polls:
+            # Only then: this traces every loginctl / wevtutil / quser call.
+            set_tracer(self.telemetry.tracer("sysmon.exec"))
         self.metrics = SystemMetrics(meter, session_tracker=self.tracker,
                                      per_cpu=self.config.per_cpu_metrics)
         self.metrics.register()
@@ -58,6 +64,7 @@ class Agent:
                 "agent.version": __version__,
                 "agent.platform": platform.platform(),
                 "otlp.endpoint": self.config.endpoint,
+                "traces.enabled": self.config.traces_enabled,
                 "metrics.interval_seconds": self.config.metrics_interval_seconds,
                 "sessions.poll_seconds": self.config.session_poll_seconds,
             },

@@ -10,11 +10,14 @@ from typing import Optional, Tuple
 import requests
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from . import SERVICE_NAME, __version__
 from .config import Config
@@ -92,6 +95,7 @@ class Telemetry:
         self.resource = build_resource(config)
         self.meter_provider: Optional[MeterProvider] = None
         self.logger_provider: Optional[LoggerProvider] = None
+        self.tracer_provider: Optional[TracerProvider] = None
         self._otel_handler: Optional[LoggingHandler] = None
 
     def start(self) -> Tuple[MeterProvider, LoggerProvider]:
@@ -122,14 +126,30 @@ class Telemetry:
 
         self._otel_handler.setFormatter(build_formatter(self.config))
         logging.getLogger("sysmon").addHandler(self._otel_handler)
+
+        if self.config.traces_enabled:
+            span_exporter = _exporter(
+                OTLPSpanExporter, self.config.signal_endpoint("traces"), self.config
+            )
+            self.tracer_provider = TracerProvider(resource=self.resource)
+            self.tracer_provider.add_span_processor(BatchSpanProcessor(span_exporter))
+            # Deliberately not set as the global provider: nothing else in this
+            # process should pick up tracing by accident.
+
         return self.meter_provider, self.logger_provider
 
     def meter(self, name: str = "sysmon-agent"):
         assert self.meter_provider is not None, "Telemetry.start() was not called"
         return self.meter_provider.get_meter(name, __version__)
 
+    def tracer(self, name: str = "sysmon-agent"):
+        """None when tracing is switched off, so callers guard on it."""
+        if self.tracer_provider is None:
+            return None
+        return self.tracer_provider.get_tracer(name, __version__)
+
     def flush(self) -> None:
-        for provider in (self.meter_provider, self.logger_provider):
+        for provider in (self.tracer_provider, self.meter_provider, self.logger_provider):
             try:
                 if provider is not None:
                     provider.force_flush(timeout_millis=self.config.export_timeout_seconds * 1000)
@@ -142,7 +162,7 @@ class Telemetry:
                 logging.getLogger("sysmon").removeHandler(self._otel_handler)
             except Exception:
                 pass
-        for provider in (self.meter_provider, self.logger_provider):
+        for provider in (self.tracer_provider, self.meter_provider, self.logger_provider):
             try:
                 if provider is not None:
                     provider.shutdown()
@@ -151,8 +171,22 @@ class Telemetry:
 
 
 def check_endpoint(config: Config) -> Tuple[bool, str]:
-    """POST an empty OTLP metrics payload to prove the collector is reachable."""
-    url = config.signal_endpoint("metrics")
+    """Probe every signal the agent will send, so a collector that only accepts
+    some of them is found now rather than after the service is running."""
+    signals = ["metrics", "logs"]
+    if config.traces_enabled:
+        signals.append("traces")
+    lines = []
+    ok = True
+    for signal in signals:
+        reachable, message = _check_signal(config, signal)
+        ok = ok and reachable
+        lines.append("%-8s %s" % (signal + ":", message))
+    return ok, "\n  ".join(lines)
+
+
+def _check_signal(config: Config, signal: str) -> Tuple[bool, str]:
+    url = config.signal_endpoint(signal)
     headers = {"Content-Type": "application/x-protobuf"}
     headers.update(config.headers())
     try:
@@ -166,14 +200,13 @@ def check_endpoint(config: Config) -> Tuple[bool, str]:
     except requests.exceptions.SSLError as exc:
         return False, "TLS error talking to %s: %s" % (url, exc)
     except requests.exceptions.RequestException as exc:
-        return False, "Cannot reach %s: %s" % (url, exc)
+        return False, "cannot reach %s: %s" % (url, exc)
     if response.status_code in (200, 202, 204, 400, 415):
         # 400/415 mean the collector answered and rejected the empty body: reachable.
-        return True, "Collector answered at %s (HTTP %d)." % (url, response.status_code)
+        return True, "%s answered (HTTP %d)" % (url, response.status_code)
     if response.status_code in (401, 403):
-        return False, "Collector rejected the credentials at %s (HTTP %d)." % (
-            url, response.status_code)
+        return False, "%s rejected the credentials (HTTP %d)" % (url, response.status_code)
     if response.status_code == 404:
-        return False, "No OTLP receiver at %s (HTTP 404). Check the endpoint path." % url
-    return False, "Unexpected reply from %s: HTTP %d %s" % (
+        return False, "no OTLP receiver at %s (HTTP 404)" % url
+    return False, "unexpected reply from %s: HTTP %d %s" % (
         url, response.status_code, response.text[:200])

@@ -17,8 +17,29 @@ class AgentError(Exception):
     """User-facing error; the CLI prints it without a traceback."""
 
 
+_TRACER = None
+
+
+def set_tracer(tracer) -> None:
+    """Trace subprocess calls. Only the agent sets this, and only when asked:
+    the trackers shell out to loginctl / wevtutil / quser on every poll."""
+    global _TRACER
+    _TRACER = tracer
+
+
 def run(cmd: Sequence[str], check: bool = False, timeout: int = 60) -> subprocess.CompletedProcess:
     """Run a command, capturing text output and never raising on decode issues."""
+    if _TRACER is None:
+        return _run(cmd, check, timeout)
+    with _TRACER.start_as_current_span("exec %s" % Path(cmd[0]).name) as span:
+        result = _run(cmd, check, timeout)
+        span.set_attribute("process.executable.name", Path(cmd[0]).name)
+        span.set_attribute("process.command_args", " ".join(map(str, cmd))[:200])
+        span.set_attribute("process.exit_code", result.returncode)
+        return result
+
+
+def _run(cmd: Sequence[str], check: bool, timeout: int) -> subprocess.CompletedProcess:
     return subprocess.run(
         list(cmd),
         check=check,

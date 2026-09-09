@@ -39,6 +39,8 @@ class Config:
     header_value: str = ""
     metrics_interval_seconds: int = 30
     per_cpu_metrics: bool = True
+    traces_enabled: bool = True
+    trace_polls: bool = False
     session_poll_seconds: int = 5
     export_timeout_seconds: int = 15
     verify_tls: bool = True
