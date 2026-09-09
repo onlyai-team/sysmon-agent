@@ -4,6 +4,7 @@ Neither platform is available in the test environment, so this checks the exact
 text that gets written: an absolute ExecStart, restart-on-crash, start-at-boot.
 """
 
+import logging
 import shlex
 import unittest
 import xml.etree.ElementTree as ET
@@ -94,6 +95,44 @@ class WindowsTaskTests(unittest.TestCase):
     def test_service_failure_actions_never_give_up(self):
         self.assertEqual(winservice._FAILURE_ACTIONS,
                          "restart/5000/restart/10000/restart/30000")
+
+
+class WindowsReinstallTests(unittest.TestCase):
+    """sc create and pywin32 both fail when the name is already registered, so
+    an upgrade has to unregister first."""
+
+    def setUp(self):
+        self.original = {name: getattr(winservice, name)
+                         for name in ("_mode", "remove", "_install_task",
+                                      "pywin32_error", "time")}
+        self.actions = []
+
+        class NoSleep:
+            @staticmethod
+            def sleep(seconds):
+                pass
+
+        self.log_level = logging.getLogger("sysmon.service").level
+        logging.getLogger("sysmon.service").setLevel(logging.CRITICAL)
+        winservice.time = NoSleep
+        winservice.pywin32_error = lambda: "No module named win32serviceutil"
+        winservice.remove = lambda: self.actions.append("remove") or ["removed"]
+        winservice._install_task = lambda: self.actions.append("install")
+
+    def tearDown(self):
+        for name, value in self.original.items():
+            setattr(winservice, name, value)
+        logging.getLogger("sysmon.service").setLevel(self.log_level)
+
+    def test_existing_registration_is_removed_first(self):
+        winservice._mode = lambda: "task"
+        winservice.install()
+        self.assertEqual(self.actions, ["remove", "install"])
+
+    def test_fresh_install_does_not_call_remove(self):
+        winservice._mode = lambda: None
+        winservice.install()
+        self.assertEqual(self.actions, ["install"])
 
 
 if __name__ == "__main__":

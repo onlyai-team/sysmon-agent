@@ -68,6 +68,27 @@ Other install flags: `--log-format json|text` (json is the default),
 
 ---
 
+## Updating
+
+An upgrade keeps the configuration; it never re-asks for the endpoint or the
+token. Copy the new source over the old folder first, then:
+
+```bash
+sudo ./scripts/install-ubuntu.sh --update
+```
+
+```powershell
+.\scripts\install-windows.ps1 -Update
+```
+
+Both stop the running agent before touching the virtual environment (on Windows
+its files stay locked while the service runs), reuse the existing venv, reinstall
+the package, re-register the service and start it again. The script prints the
+new version and the service status when it finishes.
+
+To change a setting rather than the code, re-run `install` without `--update`
+and answer the prompts; the stored values are offered as the defaults.
+
 ## Commands
 
 | Command | What it does |

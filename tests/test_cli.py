@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 
 from sysmon_agent import cli
+from dataclasses import asdict
+
 from sysmon_agent.config import Config
 
 
@@ -55,6 +57,21 @@ class BuildConfigTests(unittest.TestCase):
         config = cli.build_config(
             namespace(endpoint="https://c:4318", attribute=["broken", "k=v"]), None)
         self.assertEqual(config.extra_attributes, {"k": "v"})
+
+
+class UpdateFlowTests(unittest.TestCase):
+    """'install --non-interactive --skip-check' is how an upgrade re-registers
+    the service, so it must leave every stored answer untouched."""
+
+    def test_update_changes_nothing(self):
+        existing = Config(endpoint="https://c:4318", machine_name="edge-01",
+                          auth_type="bearer", token="tok", environment="prod",
+                          metrics_interval_seconds=15, session_poll_seconds=2,
+                          log_format="text", per_cpu_metrics=False,
+                          extra_attributes={"team": "infra"})
+        before = asdict(existing)
+        after = asdict(cli.build_config(namespace(), existing))
+        self.assertEqual(after, before)
 
 
 class TailTests(unittest.TestCase):

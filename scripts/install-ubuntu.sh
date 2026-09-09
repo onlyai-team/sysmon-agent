@@ -1,17 +1,34 @@
 #!/usr/bin/env bash
-# Install sysmon-agent into a dedicated venv under /opt and register the systemd unit.
+# Install or update sysmon-agent: a dedicated venv under /opt plus the systemd unit.
 #
-#   sudo ./scripts/install-ubuntu.sh                       # interactive prompts
+#   sudo ./scripts/install-ubuntu.sh                       # first install, prompts
+#   sudo ./scripts/install-ubuntu.sh --update              # upgrade, keeps the config
 #   sudo ./scripts/install-ubuntu.sh --endpoint ... --non-interactive
 #
-# Every argument is passed straight through to 'sysmon-agent install'.
+# Any other argument is passed straight through to 'sysmon-agent install'.
 set -euo pipefail
 
 PREFIX="${SYSMON_PREFIX:-/opt/sysmon-agent}"
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONFIG="/etc/sysmon-agent/config.json"
+UPDATE=0
+ARGS=()
+
+for arg in "$@"; do
+    if [ "$arg" = "--update" ]; then
+        UPDATE=1
+    else
+        ARGS+=("$arg")
+    fi
+done
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "This script must run as root: sudo $0 $*" >&2
+    exit 1
+fi
+
+if [ "$UPDATE" -eq 1 ] && [ ! -f "$CONFIG" ]; then
+    echo "No configuration at $CONFIG. Run without --update to install." >&2
     exit 1
 fi
 
@@ -37,12 +54,27 @@ EOF
 fi
 echo "Using uv at $UV"
 
-echo "Creating the virtual environment at $PREFIX/venv"
-"$UV" venv --python 3.11 "$PREFIX/venv"
-"$UV" pip install --python "$PREFIX/venv/bin/python" "$SOURCE_DIR"
+systemctl stop sysmon-agent 2>/dev/null || true
+
+if [ -x "$PREFIX/venv/bin/python" ]; then
+    echo "Reusing the virtual environment at $PREFIX/venv"
+else
+    echo "Creating the virtual environment at $PREFIX/venv"
+    "$UV" venv --python 3.11 "$PREFIX/venv"
+fi
+"$UV" pip install --python "$PREFIX/venv/bin/python" \
+    --reinstall-package sysmon-agent "$SOURCE_DIR"
 
 ln -sf "$PREFIX/venv/bin/sysmon-agent" /usr/local/bin/sysmon-agent
 echo "Linked /usr/local/bin/sysmon-agent"
 
 # Call the venv binary directly so the unit's ExecStart points at a stable path.
-exec "$PREFIX/venv/bin/sysmon-agent" install "$@"
+if [ "$UPDATE" -eq 1 ]; then
+    echo "Re-registering the service with the existing configuration"
+    "$PREFIX/venv/bin/sysmon-agent" install --non-interactive --skip-check
+else
+    "$PREFIX/venv/bin/sysmon-agent" install "${ARGS[@]+"${ARGS[@]}"}"
+fi
+
+"$PREFIX/venv/bin/sysmon-agent" --version
+exec "$PREFIX/venv/bin/sysmon-agent" status
