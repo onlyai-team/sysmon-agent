@@ -12,6 +12,23 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ServiceName = 'sysmon-agent'
+
+# Native tools write to stderr for ordinary conditions - schtasks does it when a
+# task simply does not exist - and under ErrorActionPreference 'Stop' that turns
+# into a terminating NativeCommandError. Run those through here instead.
+function Invoke-Native {
+    param([Parameter(Mandatory)][string] $File, [string[]] $Arguments = @())
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $File @Arguments 2>&1
+        return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($output | Out-String) }
+    } finally {
+        $ErrorActionPreference = $previous
+        $global:LASTEXITCODE = 0
+    }
+}
 
 $identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -45,10 +62,21 @@ if ($Update -and -not (Test-Path $config)) {
 }
 
 # The agent runs from inside the venv, so its files stay locked until it stops.
-Write-Host 'Stopping the agent if it is running'
-& sc.exe stop sysmon-agent 2>&1 | Out-Null
-& schtasks /End /TN sysmon-agent 2>&1 | Out-Null
-Start-Sleep -Seconds 2
+$service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+if ($service -and $service.Status -ne 'Stopped') {
+    Write-Host 'Stopping the running service'
+    Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+    (Invoke-Native -File 'sc.exe' -Arguments @('stop', $ServiceName)) | Out-Null
+}
+$task = $null
+if (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) {
+    $task = Get-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue
+}
+if ($task -and $task.State -eq 'Running') {
+    Write-Host 'Stopping the running scheduled task'
+    Stop-ScheduledTask -TaskName $ServiceName -ErrorAction SilentlyContinue
+}
+if ($service -or $task) { Start-Sleep -Seconds 2 }
 
 if (Test-Path $venvPython) {
     Write-Host "Reusing the virtual environment at $venv"
@@ -61,8 +89,8 @@ if (Test-Path $venvPython) {
 # A real Windows service needs pywin32. pip installs the package but never runs
 # its post-install step, and without that step pywintypes cannot find its DLLs.
 function Test-Pywin32 {
-    & $venvPython -c "import win32serviceutil, servicemanager" 2>&1 | Out-Null
-    return ($LASTEXITCODE -eq 0)
+    return (Invoke-Native -File $venvPython `
+        -Arguments @('-c', 'import win32serviceutil, servicemanager')).ExitCode -eq 0
 }
 
 if (-not (Test-Pywin32)) {
@@ -73,14 +101,17 @@ if (-not (Test-Pywin32)) {
 $postInstall = Join-Path $venv 'Scripts\pywin32_postinstall.py'
 if (Test-Path $postInstall) {
     Write-Host 'Registering pywin32 service support'
-    & $venvPython $postInstall -install -quiet
+    (Invoke-Native -File $venvPython -Arguments @($postInstall, '-install', '-quiet')) | Out-Null
 }
 
 if (Test-Pywin32) {
     Write-Host 'pywin32 is ready; installing as a Windows service.'
 } else {
+    $reason = (Invoke-Native -File $venvPython `
+        -Arguments @('-c', 'import win32serviceutil, servicemanager')).Output.Trim()
+    if (-not $reason) { $reason = 'no error output' }
     Write-Warning 'pywin32 is still unusable. Reason:'
-    & $venvPython -c "import win32serviceutil, servicemanager"
+    Write-Warning $reason
     Write-Warning 'The agent will be installed as a SYSTEM scheduled task instead.'
 }
 
@@ -92,6 +123,7 @@ if ($Update) {
     & $agent install @AgentArgs
 }
 $code = $LASTEXITCODE
+
 & $agent --version
 & $agent status
 exit $code
