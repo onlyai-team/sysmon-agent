@@ -22,6 +22,8 @@ AUTH_BASIC = "basic"
 AUTH_HEADER = "header"
 AUTH_TYPES = (AUTH_NONE, AUTH_BEARER, AUTH_BASIC, AUTH_HEADER)
 
+LOG_FORMATS = ("json", "text")
+
 _SECRET_KEYS = ("token", "password", "header_value")
 
 
@@ -36,11 +38,13 @@ class Config:
     header_name: str = ""
     header_value: str = ""
     metrics_interval_seconds: int = 30
+    per_cpu_metrics: bool = True
     session_poll_seconds: int = 5
     export_timeout_seconds: int = 15
     verify_tls: bool = True
     ca_bundle: str = ""
     log_level: str = "INFO"
+    log_format: str = "json"
     log_max_bytes: int = 10 * 1024 * 1024
     log_backup_count: int = 5
     environment: str = ""
@@ -95,6 +99,9 @@ class Config:
             raise AgentError("Metrics interval must be at least 1 second.")
         if self.session_poll_seconds < 1:
             raise AgentError("Session poll interval must be at least 1 second.")
+        if self.log_format not in LOG_FORMATS:
+            raise AgentError("Unknown log format %r; expected one of %s."
+                             % (self.log_format, ", ".join(LOG_FORMATS)))
         if self.ca_bundle and not Path(self.ca_bundle).exists():
             raise AgentError("CA bundle not found: %s" % self.ca_bundle)
 

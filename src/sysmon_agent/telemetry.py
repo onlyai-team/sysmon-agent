@@ -116,6 +116,11 @@ class Telemetry:
         self._otel_handler = LoggingHandler(
             level=logging.INFO, logger_provider=self.logger_provider
         )
+        # LoggingHandler renders the body through its formatter when one is set,
+        # so in json mode the exported body is the same object the log file has.
+        from .logsetup import build_formatter
+
+        self._otel_handler.setFormatter(build_formatter(self.config))
         logging.getLogger("sysmon").addHandler(self._otel_handler)
         return self.meter_provider, self.logger_provider
 

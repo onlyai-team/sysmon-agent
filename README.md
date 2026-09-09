@@ -62,6 +62,10 @@ sudo sysmon-agent install \
 Authentication schemes: `none`, `bearer`, `basic`, `header` (any custom header,
 for example `X-API-Key`).
 
+Other install flags: `--log-format json|text` (json is the default),
+`--no-per-cpu` to report host CPU totals instead of one series per core,
+`--environment`, `--attribute KEY=VALUE`, `--ca-bundle`, `--no-verify-tls`.
+
 ---
 
 ## Commands
@@ -86,35 +90,100 @@ for example `X-API-Key`).
 
 ### Metrics (OTLP/HTTP, default every 30 s)
 
-| Instrument | Attributes |
-| --- | --- |
-| `system.cpu.utilization`, `system.cpu.time.utilization`, `system.cpu.logical.count`, `system.cpu.load_average` | `state`, `period` |
-| `system.memory.usage`, `system.memory.utilization` | `state` |
-| `system.paging.usage`, `system.paging.utilization` | `state` |
-| `system.filesystem.usage`, `system.filesystem.utilization` | `device`, `mountpoint`, `type`, `state` |
-| `system.disk.io`, `system.disk.operations` | `device`, `direction` |
-| `system.network.io`, `system.network.packets`, `system.network.errors`, `system.network.dropped` | `device`, `direction` |
-| `system.network.connections` | `state` |
-| `system.processes.count`, `system.uptime` | — |
-| `system.sessions.active` | `session.kind` |
-| `system.sessions.events` | `event.name`, `session.kind`, `session.source` |
+Names and attributes follow the OpenTelemetry host metrics conventions, the same
+set the collector's `hostmetrics` receiver emits, so standard dashboards work
+without remapping.
+
+| Instrument | Unit | Attributes |
+| --- | --- | --- |
+| `system.cpu.time` | s | `cpu`, `state` |
+| `system.cpu.utilization` | 1 | `cpu`, `state` |
+| `system.cpu.logical.count` | {cpu} | — |
+| `system.cpu.load_average.1m` / `.5m` / `.15m` | {thread} | — |
+| `system.memory.usage` | By | `state` |
+| `system.memory.utilization` | 1 | — |
+| `system.paging.usage` | By | `state` |
+| `system.paging.utilization` | 1 | — |
+| `system.paging.operations` | {operation} | `direction`, `type` |
+| `system.filesystem.usage` | By | `device`, `mountpoint`, `type`, `mode`, `state` |
+| `system.filesystem.utilization` | 1 | `device`, `mountpoint`, `type`, `mode` |
+| `system.filesystem.inodes.usage` | {inode} | `device`, `mountpoint`, `type`, `mode`, `state` |
+| `system.disk.io` | By | `device`, `direction` |
+| `system.disk.operations` | {operation} | `device`, `direction` |
+| `system.disk.operation_time` | s | `device`, `direction` |
+| `system.disk.io_time` | s | `device` |
+| `system.disk.merged` | {operation} | `device`, `direction` |
+| `system.network.io` | By | `device`, `direction` |
+| `system.network.packets` | {packet} | `device`, `direction` |
+| `system.network.errors` | {error} | `device`, `direction` |
+| `system.network.dropped` | {packet} | `device`, `direction` |
+| `system.network.connections` | {connection} | `protocol`, `state` |
+| `system.processes.count` | {process} | `status` |
+| `system.processes.created` | {process} | — |
+| `system.uptime` | s | — |
+| `system.sessions.active` | {session} | `session.kind` |
+| `system.sessions.events` | {event} | `event.name`, `session.kind`, `session.source` |
+
+`state` values on `system.cpu.time` follow the convention: `user`, `system`,
+`idle`, `nice`, `wait`, `interrupt`, `softirq`, `steal`.
+
+Some instruments have no data source on every platform and simply report
+nothing there: `system.disk.io_time`, `system.disk.merged`,
+`system.paging.operations` and `system.processes.created` are Linux only, and
+`system.filesystem.inodes.usage` does not exist on Windows.
+
+CPU metrics carry one series per logical core. On a machine with many cores that
+multiplies cardinality, so `--no-per-cpu` drops the `cpu` attribute and reports
+host totals instead.
 
 Pseudo filesystems (tmpfs, squashfs, overlay, /snap, …) are filtered out.
 
 ### Session events (OTLP logs)
 
-One log record per event, with `event.name` set to `session.start`,
-`session.end`, `session.observed` (a session that was already open when the
-agent started), `rdp.disconnected`, `rdp.reconnected`, `agent.start` or
-`agent.stop`.
+Every event is exported twice over: as a JSON object in the log record body, and
+as OTel attributes on the same record. Use whichever your pipeline reads.
 
-Attributes: `session.id`, `session.kind`, `session.source`, `user.name`,
-`enduser.id`, `client.address`, `client.port`, `session.terminal`,
-`session.display`, `session.service`, `session.logon_type`, `process.pid`,
-`session.started_at`, `session.ended_at`, `session.duration_seconds`.
+```json
+{
+  "time": "2026-09-09T09:41:12.204Z",
+  "level": "INFO",
+  "logger": "sysmon.events",
+  "message": "Login: ssh alice from 203.0.113.5 (session logind:47)",
+  "event.name": "session.start",
+  "session.id": "logind:47",
+  "session.kind": "ssh",
+  "session.source": "systemd-logind",
+  "user.name": "alice",
+  "enduser.id": "alice",
+  "client.address": "203.0.113.5",
+  "session.terminal": "pts/0",
+  "process.pid": 40122,
+  "session.started_at": "2026-09-09T09:41:12Z"
+}
+```
+
+A logout carries `session.ended_at` and `session.duration_seconds` as well.
+
+`event.name` is what you route on:
+
+| `event.name` | Meaning |
+| --- | --- |
+| `session.start` | A login |
+| `session.end` | A logout, with the duration |
+| `session.observed` | A session that was already open when the agent started |
+| `rdp.disconnected` / `rdp.reconnected` | The RDP session stayed alive but the client detached or came back |
+| `agent.start` / `agent.stop` | The agent itself |
 
 `session.kind` is one of `ssh`, `rdp`, `vnc`, `console`, `gui`, `remote`,
 `unknown`.
+
+To alert on remote logins, match `event.name = session.start` and
+`session.kind` in (`ssh`, `rdp`, `vnc`), then read `user.name` and
+`client.address` for the notification text.
+
+Pass `--log-format text` at install time if you would rather have prose lines;
+the body then reads `Login: ssh alice from 203.0.113.5 (session logind:47)` and
+the attributes are unchanged.
 
 ### Resource attributes
 
@@ -176,7 +245,9 @@ of the exported log stream so a collector outage cannot feed itself.
 | Logs | `/var/log/sysmon-agent/agent.log` | `C:\ProgramData\sysmon-agent\logs\agent.log` |
 | State | `/var/lib/sysmon-agent` | `C:\ProgramData\sysmon-agent\state` |
 
-The log file rotates at 10 MB, keeping five generations. On Ubuntu the same
+The log file holds the same JSON records that go to the collector, one object
+per line, so `tail -f` piped into `jq` is a working local notifier. It rotates
+at 10 MB, keeping five generations. On Ubuntu the same
 output also reaches the journal, so `sysmon-agent logs --source journal` works.
 
 Set `SYSMON_AGENT_HOME` to relocate all three, which is how you run the agent

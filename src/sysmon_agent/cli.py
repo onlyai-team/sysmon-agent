@@ -19,7 +19,7 @@ from typing import List, Optional
 
 from . import SERVICE_NAME, __version__
 from .config import (AUTH_BASIC, AUTH_BEARER, AUTH_HEADER, AUTH_NONE, AUTH_TYPES,
-                     Config)
+                     LOG_FORMATS, Config)
 from .paths import IS_WINDOWS, config_file, ensure_dirs, log_dir, log_file, state_dir
 from .util import AgentError, human_bytes, is_admin, require_admin
 
@@ -177,6 +177,10 @@ def _apply_common_flags(config: Config, args) -> None:
         config.ca_bundle = args.ca_bundle
     if args.no_verify_tls:
         config.verify_tls = False
+    if getattr(args, "no_per_cpu", False):
+        config.per_cpu_metrics = False
+    if getattr(args, "log_format", None):
+        config.log_format = args.log_format
     if args.attribute:
         for pair in args.attribute:
             key, _, value = pair.partition("=")
@@ -474,6 +478,11 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--environment", help="deployment.environment attribute")
     install.add_argument("--attribute", action="append", metavar="KEY=VALUE",
                          help="extra resource attribute, repeatable")
+    install.add_argument("--log-format", choices=LOG_FORMATS,
+                         help="json (default) writes one JSON object per event, "
+                              "in the log file and in the exported log body")
+    install.add_argument("--no-per-cpu", action="store_true",
+                         help="report CPU metrics for the host only, not per core")
     install.add_argument("--ca-bundle", help="path to a custom CA bundle")
     install.add_argument("--no-verify-tls", action="store_true",
                          help="do not verify the collector's TLS certificate")

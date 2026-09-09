@@ -1,6 +1,6 @@
 [project]
 name = "sysmon-agent"
-version = "1.0.1"
+version = "1.1.0"
 description = "Cross-platform system + login-session monitoring agent that ships metrics and events to an OTLP/HTTP collector."
 readme = "README.md"
 requires-python = ">=3.9"

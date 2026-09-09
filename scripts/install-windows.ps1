@@ -1,13 +1,14 @@
-# Install sysmon-agent into a dedicated venv under ProgramData and register the
-# Windows service. Run from an elevated PowerShell:
+# Install or update sysmon-agent. Run from an elevated PowerShell.
 #
-#   .\scripts\install-windows.ps1
+#   .\scripts\install-windows.ps1                 # first install, prompts for settings
+#   .\scripts\install-windows.ps1 -Update         # upgrade in place, keeps the config
 #   .\scripts\install-windows.ps1 -AgentArgs @('--endpoint','https://c:4318','--non-interactive')
 #
 [CmdletBinding()]
 param(
     [string] $Prefix = "$env:ProgramData\sysmon-agent",
-    [string[]] $AgentArgs = @()
+    [string[]] $AgentArgs = @(),
+    [switch] $Update
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,6 +19,10 @@ if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
 }
 
 $sourceDir = Split-Path -Parent $PSScriptRoot
+$venv = Join-Path $Prefix 'venv'
+$venvPython = Join-Path $venv 'Scripts\python.exe'
+$agent = Join-Path $venv 'Scripts\sysmon-agent.exe'
+$config = Join-Path $Prefix 'config.json'
 
 $uv = (Get-Command uv -ErrorAction SilentlyContinue).Source
 if (-not $uv) {
@@ -35,12 +40,23 @@ uv was not found. Install it first, then re-run this script:
 }
 Write-Host "Using uv at $uv"
 
-$venv = Join-Path $Prefix 'venv'
-Write-Host "Creating the virtual environment at $venv"
-& $uv venv --python 3.11 $venv
-& $uv pip install --python (Join-Path $venv 'Scripts\python.exe') $sourceDir
+if ($Update -and -not (Test-Path $config)) {
+    throw "No configuration at $config. Run this script without -Update to install."
+}
 
-$venvPython = Join-Path $venv 'Scripts\python.exe'
+# The agent runs from inside the venv, so its files stay locked until it stops.
+Write-Host 'Stopping the agent if it is running'
+& sc.exe stop sysmon-agent 2>&1 | Out-Null
+& schtasks /End /TN sysmon-agent 2>&1 | Out-Null
+Start-Sleep -Seconds 2
+
+if (Test-Path $venvPython) {
+    Write-Host "Reusing the virtual environment at $venv"
+} else {
+    Write-Host "Creating the virtual environment at $venv"
+    & $uv venv --python 3.11 $venv
+}
+& $uv pip install --python $venvPython --reinstall-package sysmon-agent $sourceDir
 
 # A real Windows service needs pywin32. pip installs the package but never runs
 # its post-install step, and without that step pywintypes cannot find its DLLs.
@@ -68,7 +84,14 @@ if (Test-Pywin32) {
     Write-Warning 'The agent will be installed as a SYSTEM scheduled task instead.'
 }
 
-$agent = Join-Path $venv 'Scripts\sysmon-agent.exe'
-Write-Host "Running: $agent install $AgentArgs"
-& $agent install @AgentArgs
-exit $LASTEXITCODE
+if ($Update) {
+    # Keep every stored answer; just re-register and start the new version.
+    Write-Host 'Re-registering the service with the existing configuration'
+    & $agent install --non-interactive --skip-check
+} else {
+    & $agent install @AgentArgs
+}
+$code = $LASTEXITCODE
+& $agent --version
+& $agent status
+exit $code

@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -222,6 +223,17 @@ def available() -> bool:
 
 
 def install() -> None:
+    # Re-registering over an existing service or task fails, so a reinstall or
+    # an upgrade has to unregister first.
+    existing = _mode()
+    if existing is not None:
+        LOG.info("Removing the previous registration (%s) before reinstalling",
+                 existing)
+        for step in remove():
+            LOG.info("  %s", step)
+        # sc delete completes asynchronously once the last handle closes.
+        time.sleep(2)
+
     error = pywin32_error()
     if error is None:
         LOG.info("Installing Windows service via pywin32")

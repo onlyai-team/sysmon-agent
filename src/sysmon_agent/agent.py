@@ -46,7 +46,8 @@ class Agent:
         self.tracker = build_tracker(
             self.config.session_poll_seconds, on_event=self._on_session_event
         )
-        self.metrics = SystemMetrics(meter, session_tracker=self.tracker)
+        self.metrics = SystemMetrics(meter, session_tracker=self.tracker,
+                                     per_cpu=self.config.per_cpu_metrics)
         self.metrics.register()
         self.tracker.start()
 
