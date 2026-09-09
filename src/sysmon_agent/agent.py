@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import platform
 import threading
@@ -18,8 +19,6 @@ from .util import set_tracer
 LOG = logging.getLogger("sysmon.agent")
 EVENTS = logging.getLogger("sysmon.events")
 
-HEARTBEAT_SECONDS = 300
-
 
 class Agent:
     """Owns the telemetry pipeline and the session tracker for one process."""
@@ -30,6 +29,7 @@ class Agent:
         self.telemetry = Telemetry(config)
         self.tracker = None
         self.metrics = None
+        self._tracer = None
         self._session_events = None
 
     def run(self, stop_event: Optional[threading.Event] = None) -> int:
@@ -37,25 +37,12 @@ class Agent:
         started = time.time()
 
         self.telemetry.start()
-        meter = self.telemetry.meter()
-        self._session_events = meter.create_counter(
-            "system.sessions.events",
-            unit="{event}",
-            description="Login session start/end events observed",
-        )
+        self._tracer = self.telemetry.tracer("sysmon.agent")
 
-        self.tracker = build_tracker(
-            self.config.session_poll_seconds, on_event=self._on_session_event
-        )
-        tracer = self.telemetry.tracer("sysmon.sessions")
-        self.tracker.set_tracing(tracer, self.config.trace_polls)
-        if tracer is not None and self.config.trace_polls:
-            # Only then: this traces every loginctl / wevtutil / quser call.
-            set_tracer(self.telemetry.tracer("sysmon.exec"))
-        self.metrics = SystemMetrics(meter, session_tracker=self.tracker,
-                                     per_cpu=self.config.per_cpu_metrics)
-        self.metrics.register()
-        self.tracker.start()
+        # A span that closes during startup, so traces show up on every service
+        # start instead of waiting for the first logout.
+        with self._span("agent.startup") as span:
+            self._start_pipeline(span)
 
         EVENTS.info(
             "Agent started on %s" % self.config.machine_name,
@@ -73,7 +60,7 @@ class Agent:
                  __version__, self.config.endpoint, self.config.metrics_interval_seconds)
 
         try:
-            while not stop.wait(HEARTBEAT_SECONDS):
+            while not stop.wait(self.config.heartbeat_seconds):
                 self._heartbeat(started)
         except KeyboardInterrupt:
             LOG.info("Interrupted")
@@ -81,10 +68,61 @@ class Agent:
             self.stop(started)
         return 0
 
+    # ------------------------------------------------------------- startup
+
+    def _start_pipeline(self, span) -> None:
+        meter = self.telemetry.meter()
+        self._session_events = meter.create_counter(
+            "system.sessions.events",
+            unit="{event}",
+            description="Login session start/end events observed",
+        )
+
+        self.tracker = build_tracker(
+            self.config.session_poll_seconds, on_event=self._on_session_event
+        )
+        session_tracer = self.telemetry.tracer("sysmon.sessions")
+        self.tracker.set_tracing(session_tracer, self.config.trace_polls)
+        if session_tracer is not None and self.config.trace_polls:
+            # Only then: this traces every loginctl / wevtutil / quser call.
+            set_tracer(self.telemetry.tracer("sysmon.exec"))
+
+        self.metrics = SystemMetrics(meter, session_tracker=self.tracker,
+                                     per_cpu=self.config.per_cpu_metrics)
+        self.metrics.register()
+        self.tracker.start()
+
+        if span is not None:
+            span.set_attribute("agent.version", __version__)
+            span.set_attribute("agent.platform", platform.platform())
+            span.set_attribute("otlp.endpoint", self.config.endpoint)
+            span.set_attribute("session.source", self.tracker.source_name)
+            span.set_attribute("metrics.interval_seconds",
+                               self.config.metrics_interval_seconds)
+
+    # ----------------------------------------------------------- heartbeat
+
     def _heartbeat(self, started: float) -> None:
-        counts = self.tracker.active_counts() if self.tracker else {}
-        LOG.info("Heartbeat: uptime %ds, active sessions %s",
-                 int(time.time() - started), counts or "none")
+        """Periodic health check. It is also a span, so the trace stream stays
+        alive on a machine where nobody logs in or out for hours."""
+        with self._span("agent.heartbeat") as span:
+            counts = self.tracker.active_counts() if self.tracker else {}
+            uptime = int(time.time() - started)
+            if span is not None:
+                span.set_attribute("agent.version", __version__)
+                span.set_attribute("agent.uptime_seconds", uptime)
+                span.set_attribute("session.active_count", sum(counts.values()))
+                for kind, count in counts.items():
+                    span.set_attribute("session.active.%s" % kind, count)
+            LOG.info("Heartbeat: uptime %ds, active sessions %s",
+                     uptime, counts or "none")
+
+    def _span(self, name: str):
+        if self._tracer is None:
+            return contextlib.nullcontext()
+        return self._tracer.start_as_current_span(name)
+
+    # -------------------------------------------------------------- events
 
     def _on_session_event(self, event, session, attributes) -> None:
         if self._session_events is None:
@@ -97,6 +135,8 @@ class Agent:
             })
         except Exception as exc:
             LOG.debug("Session counter failed: %s", exc)
+
+    # ------------------------------------------------------------ shutdown
 
     def stop(self, started: Optional[float] = None) -> None:
         LOG.info("Shutting down")

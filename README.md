@@ -65,7 +65,7 @@ for example `X-API-Key`).
 
 Other install flags: `--log-format json|text` (json is the default),
 `--no-traces` to export metrics and logs only, `--trace-polls` to span each
-session poll while debugging,
+session poll while debugging, `--heartbeat` to pace the heartbeat span,
 `--no-per-cpu` to report host CPU totals instead of one series per core,
 `--environment`, `--attribute KEY=VALUE`, `--ca-bundle`, `--no-verify-tls`.
 
@@ -101,7 +101,7 @@ and answer the prompts; the stored values are offered as the defaults.
 | `sysmon-agent logs` | Show the agent log. `-f` follows, `-n` sets the line count, `--source journal` reads the systemd journal |
 | `sysmon-agent status` | Service state, effective configuration and a live system snapshot |
 | `sysmon-agent sessions` | List the login sessions detected right now, with their classification |
-| `sysmon-agent test` | Check that the collector is reachable and the credentials are accepted |
+| `sysmon-agent test` | Check that the collector is reachable and the credentials are accepted. `--send` pushes one real span and log record and reports whether they were accepted |
 | `sysmon-agent config` | Print the stored configuration with secrets redacted |
 | `sysmon-agent restart` | Restart the background service |
 | `sysmon-agent run` | Run in the foreground; this is what the service manager calls |
@@ -211,25 +211,41 @@ the attributes are unchanged.
 
 ### Traces (OTLP spans)
 
-Each login opens a span that closes at logout, so a trace backend shows one span
-per session with its real duration. The span name is `session <kind>`, for
-example `session ssh`, which keeps cardinality low; the user and client address
-are attributes, carrying the same keys the log record uses.
+Three kinds of span:
 
-Session logs are emitted inside their span, so every `session.start` and
-`session.end` record carries the trace id and span id. A log line in the alert
-links straight to the session span.
+| Span | When it ends | Why |
+| --- | --- | --- |
+| `agent.startup` | A second after the service starts | Traces appear on every restart, so the signal is never silent |
+| `agent.heartbeat` | Every `--heartbeat` seconds, 300 by default | Keeps the stream alive on a machine where nobody logs in for hours; carries uptime and the active session counts |
+| `session <kind>` | At logout | One span per login session, with its real duration |
 
-Two things follow from spans only being exported when they end:
+The session span is named `session ssh`, `session rdp` and so on, which keeps
+cardinality low; the user and client address are attributes, carrying the same
+keys the log record uses. Session logs are emitted inside their span, so every
+`session.start` and `session.end` record has the trace id and span id, and a log
+line in an alert links straight to the session span.
 
-- A login shows up in traces at **logout**, not at login. Alert on the logs, use
-  the traces to see how long sessions ran and which hosts they came from.
+Two things follow from a span only being exported once it ends:
+
+- A login reaches the trace backend at **logout**, not at login. Alert on the
+  logs; use the traces for duration and origin. The startup and heartbeat spans
+  are what prove the pipeline works in between.
 - Sessions still open when the agent stops are ended with
   `session.open_at_agent_stop = true` and carry no duration, since that end time
   is a shutdown and not a logout.
 
+To confirm traces reach your collector without waiting for a logout:
+
+```bash
+sysmon-agent test --send
+```
+
+That sends one real span named `agent.test` and one real log record through the
+same exporters the service uses, then reports whether the collector accepted
+each. Plain `sysmon-agent test` only checks that the routes answer.
+
 `--trace-polls` adds a `session.poll` span per poll, with a child `exec` span for
-every `loginctl`, `wevtutil` or `quser` call and the exit code. That is a
+every `loginctl`, `wevtutil` or `quser` call and its exit code. That is a
 debugging tool for a machine where session detection misbehaves; it is off by
 default because it produces a span every few seconds. `--no-traces` turns the
 signal off entirely.

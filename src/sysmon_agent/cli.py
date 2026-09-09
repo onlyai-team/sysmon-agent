@@ -171,6 +171,8 @@ def _apply_common_flags(config: Config, args) -> None:
         config.metrics_interval_seconds = args.interval
     if args.session_poll:
         config.session_poll_seconds = args.session_poll
+    if getattr(args, "heartbeat", None):
+        config.heartbeat_seconds = args.heartbeat
     if args.environment is not None:
         config.environment = args.environment
     if args.ca_bundle:
@@ -427,13 +429,26 @@ def cmd_run(args) -> int:
 
 
 def cmd_test(args) -> int:
-    from .telemetry import check_endpoint
+    from .telemetry import check_endpoint, send_test_telemetry
 
     config = Config.load()
     config.validate()
     ok, message = check_endpoint(config)
     print("%s\n  %s" % ("OK" if ok else "FAILED", message))
-    return 0 if ok else 1
+    if not args.send:
+        return 0 if ok else 1
+
+    print("\nSending one real span and one real log record...")
+    failures = 0
+    for signal, sent, detail in send_test_telemetry(config):
+        print("  %-8s %-7s %s" % (signal + ":", "OK" if sent else "FAILED", detail))
+        failures += 0 if sent else 1
+    if failures:
+        print("\nThe collector refused the payload. The exporter logs the reason; "
+              "run with a reachable endpoint or check the credentials.")
+    else:
+        print("\nLook for a span named 'agent.test' in your trace backend.")
+    return 0 if ok and failures == 0 else 1
 
 
 def cmd_config(args) -> int:
@@ -479,6 +494,9 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--interval", type=int, help="metric export interval in seconds")
     install.add_argument("--session-poll", type=int,
                          help="session poll interval in seconds")
+    install.add_argument("--heartbeat", type=int,
+                         help="heartbeat interval in seconds; also paces the "
+                              "agent.heartbeat span (default 300)")
     install.add_argument("--environment", help="deployment.environment attribute")
     install.add_argument("--attribute", action="append", metavar="KEY=VALUE",
                          help="extra resource attribute, repeatable")
@@ -532,6 +550,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.set_defaults(func=cmd_run)
 
     test = sub.add_parser("test", help="check that the collector is reachable")
+    test.add_argument("--send", action="store_true",
+                      help="also send one real span and log record, then report "
+                           "whether the collector accepted them")
     test.set_defaults(func=cmd_test)
 
     config = sub.add_parser("config", help="print the stored configuration, secrets redacted")

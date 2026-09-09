@@ -41,6 +41,7 @@ class Config:
     per_cpu_metrics: bool = True
     traces_enabled: bool = True
     trace_polls: bool = False
+    heartbeat_seconds: int = 300
     session_poll_seconds: int = 5
     export_timeout_seconds: int = 15
     verify_tls: bool = True
@@ -101,6 +102,8 @@ class Config:
             raise AgentError("Metrics interval must be at least 1 second.")
         if self.session_poll_seconds < 1:
             raise AgentError("Session poll interval must be at least 1 second.")
+        if self.heartbeat_seconds < 10:
+            raise AgentError("Heartbeat interval must be at least 10 seconds.")
         if self.log_format not in LOG_FORMATS:
             raise AgentError("Unknown log format %r; expected one of %s."
                              % (self.log_format, ", ".join(LOG_FORMATS)))

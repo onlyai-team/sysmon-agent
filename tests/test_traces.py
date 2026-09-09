@@ -158,6 +158,41 @@ class PollSpanTests(unittest.TestCase):
         self.assertTrue(span.events)  # the exception was recorded
 
 
+class AgentSpanTests(unittest.TestCase):
+    """Regression: with the defaults, a machine where nobody logs out produced
+    no spans at all, so the traces signal looked dead."""
+
+    def agent(self, exporter, provider, heartbeat=10):
+        from sysmon_agent.agent import Agent
+
+        config = Config(endpoint="http://127.0.0.1:4318", machine_name="test",
+                        heartbeat_seconds=heartbeat)
+        agent = Agent.__new__(Agent)
+        agent.config = config
+        agent.tracker = None
+        agent._tracer = provider.get_tracer("test")
+        return agent
+
+    def test_heartbeat_emits_a_span_with_no_session_activity(self):
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        agent = self.agent(exporter, provider)
+
+        agent._heartbeat(time.time() - 42)
+
+        spans = exporter.get_finished_spans()
+        self.assertEqual([s.name for s in spans], ["agent.heartbeat"])
+        attributes = dict(spans[0].attributes)
+        self.assertGreaterEqual(attributes["agent.uptime_seconds"], 42)
+        self.assertEqual(attributes["session.active_count"], 0)
+
+    def test_heartbeat_without_a_tracer_still_logs(self):
+        agent = self.agent(None, TracerProvider())
+        agent._tracer = None
+        agent._heartbeat(time.time())  # must not raise
+
+
 class LogTraceCorrelationTests(unittest.TestCase):
     def test_session_logs_carry_the_trace_and_span_ids(self):
         _, tracer = tracing()

@@ -1,6 +1,6 @@
 """Cross-platform system and login-session monitoring agent."""
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 SERVICE_NAME = "sysmon-agent"
 SERVICE_DISPLAY_NAME = "System & Session Monitor Agent"

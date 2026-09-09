@@ -210,3 +210,79 @@ def _check_signal(config: Config, signal: str) -> Tuple[bool, str]:
         return False, "no OTLP receiver at %s (HTTP 404)" % url
     return False, "unexpected reply from %s: HTTP %d %s" % (
         url, response.status_code, response.text[:200])
+
+
+class _RecordingExporter:
+    """Wraps an exporter so a one-off send can report what the collector said."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.results = []
+
+    def export(self, batch):
+        result = self.inner.export(batch)
+        self.results.append(result)
+        return result
+
+    def shutdown(self):
+        return self.inner.shutdown()
+
+    def force_flush(self, timeout_millis: int = 30000):
+        return True
+
+    def ok(self) -> bool:
+        return bool(self.results) and all(
+            str(result).endswith("SUCCESS") for result in self.results)
+
+
+def send_test_telemetry(config: Config):
+    """Send one span and one log record for real. Returns [(signal, ok, detail)].
+
+    An empty POST proves the route exists; this proves the exporters, the
+    credentials and the payload encoding all work end to end.
+    """
+    from opentelemetry.sdk._logs.export import SimpleLogRecordProcessor
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+    resource = build_resource(config)
+    results = []
+
+    if config.traces_enabled:
+        exporter = _RecordingExporter(
+            _exporter(OTLPSpanExporter, config.signal_endpoint("traces"), config))
+        provider = TracerProvider(resource=resource)
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        with provider.get_tracer("sysmon.test").start_as_current_span(
+                "agent.test") as span:
+            span.set_attribute("agent.version", __version__)
+            span.set_attribute("test", True)
+        provider.shutdown()
+        results.append(("traces", exporter.ok(),
+                        "one span named 'agent.test' -> %s"
+                        % config.signal_endpoint("traces")))
+    else:
+        results.append(("traces", True, "disabled in the configuration"))
+
+    log_exporter = _RecordingExporter(
+        _exporter(OTLPLogExporter, config.signal_endpoint("logs"), config))
+    log_provider = LoggerProvider(resource=resource)
+    log_provider.add_log_record_processor(SimpleLogRecordProcessor(log_exporter))
+    handler = LoggingHandler(level=logging.INFO, logger_provider=log_provider)
+    from .logsetup import build_formatter
+
+    handler.setFormatter(build_formatter(config))
+    logger = logging.getLogger("sysmon.test")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.addHandler(handler)
+    try:
+        logger.info("sysmon-agent connectivity test",
+                    extra={"event.name": "agent.test", "test": True})
+    finally:
+        logger.removeHandler(handler)
+    log_provider.shutdown()
+    results.append(("logs", log_exporter.ok(),
+                    "one log record -> %s" % config.signal_endpoint("logs")))
+
+    return results
