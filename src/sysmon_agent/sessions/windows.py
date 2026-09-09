@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Set
 
 from ..util import have, run
-from .base import EVENTS, SessionTracker
+from .base import SessionTracker
 from .model import (KIND_CONSOLE, KIND_GUI, KIND_RDP, KIND_REMOTE, KIND_UNKNOWN,
                     KIND_VNC, Session)
 from .vnc import VNC_PROCESS_HINTS, probe_vnc_connections
@@ -183,21 +183,23 @@ class WindowsSessionTracker(SessionTracker):
                 self._rdp_addresses[user.split("\\")[-1].lower()] = address
             name = _TS_EVENT_NAME.get(str(event_id), "session.event")
             if event_id in (24, 25):
-                # Disconnect / reconnect are not logon or logoff, but they matter
-                # for RDP: the session stays alive with nobody attached.
-                EVENTS.info(
+                # Disconnect and reconnect are not logon or logoff, but they
+                # matter: the RDP session stays alive with nobody attached.
+                verb = name.split(".")[-1]
+                session = Session(
+                    id="win:ts:%s" % data.get("SessionID", "?"),
+                    user=user,
+                    kind=KIND_RDP,
+                    remote_host=address,
+                    source="terminal-services",
+                    started_at=when,
+                )
+                self.emit_event(
+                    "rdp.%s" % verb,
+                    session,
                     "RDP %s: %s from %s (terminal session %s)"
-                    % (name.split(".")[-1], user or "?", address or "unknown",
+                    % (verb, user or "?", address or "unknown",
                        data.get("SessionID", "?")),
-                    extra={
-                        "event.name": "rdp.%s" % name.split(".")[-1],
-                        "session.kind": KIND_RDP,
-                        "session.source": "terminal-services",
-                        "session.id": "win:ts:%s" % data.get("SessionID", "?"),
-                        "user.name": user,
-                        "enduser.id": user,
-                        "client.address": address,
-                    },
                 )
 
     # ---------------------------------------------------------- quser baseline

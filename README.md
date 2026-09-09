@@ -67,6 +67,9 @@ Other install flags: `--log-format json|text` (json is the default),
 `--no-traces` to export metrics and logs only, `--trace-polls` to span each
 session poll while debugging, `--heartbeat` to pace the heartbeat span,
 `--no-per-cpu` to report host CPU totals instead of one series per core,
+`--webhook-url` with `--webhook-auth-type` / `--webhook-token` /
+`--webhook-username` / `--webhook-password` / `--webhook-header-name` /
+`--webhook-header-value` / `--webhook-timeout` / `--webhook-no-verify-tls`,
 `--environment`, `--attribute KEY=VALUE`, `--ca-bundle`, `--no-verify-tls`.
 
 ---
@@ -249,6 +252,76 @@ every `loginctl`, `wevtutil` or `quser` call and its exit code. That is a
 debugging tool for a machine where session detection misbehaves; it is off by
 default because it produces a span every few seconds. `--no-traces` turns the
 signal off entirely.
+
+### Webhook (session enter and exit only)
+
+Optional, and asked for during `install`. When a URL is set, the agent POSTs a
+JSON body the moment somebody enters or leaves a session, so a notifier does not
+have to sit behind the collector.
+
+| `event.name` | `action` |
+| --- | --- |
+| `session.start` | `enter` |
+| `rdp.reconnected` | `enter` |
+| `session.end` | `exit` |
+| `rdp.disconnected` | `exit` |
+
+Nothing else is sent. An RDP client detaching is somebody leaving even though
+the session lives on, and re-attaching is them coming back. Sessions already
+open when the agent starts (`session.observed`) are a baseline, not an entry, so
+they never fire the webhook, and neither do the agent's own lifecycle events.
+
+The body is the JSON log record the collector receives, with the same field
+names, plus `action` and the resource attributes:
+
+```json
+{
+  "time": "2026-09-09T09:41:12.204Z",
+  "action": "enter",
+  "level": "INFO",
+  "logger": "sysmon.events",
+  "message": "Login: ssh alice from 203.0.113.5 (session logind:47)",
+  "event.name": "session.start",
+  "session.id": "logind:47",
+  "session.kind": "ssh",
+  "session.source": "systemd-logind",
+  "user.name": "alice",
+  "enduser.id": "alice",
+  "client.address": "203.0.113.5",
+  "session.terminal": "pts/0",
+  "process.pid": 40122,
+  "session.started_at": "2026-09-09T09:41:12Z",
+  "resource": {
+    "service.name": "sysmon-agent",
+    "service.version": "1.4.0",
+    "host.name": "edge-01",
+    "os.type": "linux",
+    "deployment.environment": "production"
+  }
+}
+```
+
+An `exit` body adds `session.ended_at` and `session.duration_seconds`. So a
+consumer can parse a webhook delivery and an OTLP log record with the same code.
+
+Authentication uses the same four schemes as the collector, configured
+separately: `none`, `bearer`, `basic`, or any custom header. The OTLP
+credentials are never reused for the webhook.
+
+Delivery runs on its own thread with a bounded queue, so a slow endpoint never
+delays session polling. A failed POST is retried twice with backoff; a 4xx other
+than 429 is not retried, since the same body would be rejected again. Failures
+are logged and counted, never raised. If the queue fills, events are dropped
+with a warning rather than blocking the agent.
+
+Check it without waiting for someone to log in:
+
+```bash
+sysmon-agent test --send
+```
+
+That posts one synthetic `enter` event marked `"test": true`, alongside the OTLP
+span and log record.
 
 ### Resource attributes
 

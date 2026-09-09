@@ -15,9 +15,18 @@ from .metrics import SystemMetrics
 from .sessions import build_tracker
 from .telemetry import Telemetry
 from .util import set_tracer
+from .webhook import WebhookNotifier
 
 LOG = logging.getLogger("sysmon.agent")
 EVENTS = logging.getLogger("sysmon.events")
+
+_VERBS = {
+    "session.start": "Login",
+    "session.end": "Logout",
+    "session.observed": "Existing session",
+    "rdp.reconnected": "RDP reconnected",
+    "rdp.disconnected": "RDP disconnected",
+}
 
 
 class Agent:
@@ -31,6 +40,7 @@ class Agent:
         self.metrics = None
         self._tracer = None
         self._session_events = None
+        self.webhook = None
 
     def run(self, stop_event: Optional[threading.Event] = None) -> int:
         stop = stop_event or threading.Event()
@@ -90,6 +100,11 @@ class Agent:
         self.metrics = SystemMetrics(meter, session_tracker=self.tracker,
                                      per_cpu=self.config.per_cpu_metrics)
         self.metrics.register()
+
+        # Started before the tracker, so the first login is never missed.
+        self.webhook = WebhookNotifier(self.config, self._resource_attributes())
+        self.webhook.start()
+
         self.tracker.start()
 
         if span is not None:
@@ -99,6 +114,7 @@ class Agent:
             span.set_attribute("session.source", self.tracker.source_name)
             span.set_attribute("metrics.interval_seconds",
                                self.config.metrics_interval_seconds)
+            span.set_attribute("webhook.enabled", self.config.webhook_enabled())
 
     # ----------------------------------------------------------- heartbeat
 
@@ -125,21 +141,38 @@ class Agent:
     # -------------------------------------------------------------- events
 
     def _on_session_event(self, event, session, attributes) -> None:
-        if self._session_events is None:
-            return
-        try:
-            self._session_events.add(1, {
-                "event.name": event,
-                "session.kind": session.kind,
-                "session.source": session.source,
-            })
-        except Exception as exc:
-            LOG.debug("Session counter failed: %s", exc)
+        if self._session_events is not None:
+            try:
+                self._session_events.add(1, {
+                    "event.name": event,
+                    "session.kind": session.kind,
+                    "session.source": session.source,
+                })
+            except Exception as exc:
+                LOG.debug("Session counter failed: %s", exc)
+        if self.webhook is not None:
+            try:
+                self.webhook.notify(event, "%s: %s" % (
+                    _VERBS.get(event, "Session event"), session.summary()), attributes)
+            except Exception as exc:
+                LOG.debug("Webhook notify failed: %s", exc)
+
+    def _resource_attributes(self) -> dict:
+        """The same identity the OTLP resource carries, for the webhook payload."""
+        return {
+            "service.name": "sysmon-agent",
+            "service.version": __version__,
+            "host.name": self.config.machine_name,
+            "os.type": platform.system().lower(),
+            "deployment.environment": self.config.environment,
+        }
 
     # ------------------------------------------------------------ shutdown
 
     def stop(self, started: Optional[float] = None) -> None:
         LOG.info("Shutting down")
+        # The tracker stops first, so a logout seen at shutdown still reaches
+        # the webhook before it drains.
         if self.tracker is not None:
             self.tracker.stop()
             self.tracker.join(timeout=5)
@@ -151,5 +184,7 @@ class Agent:
                 "agent.uptime_seconds": round(time.time() - started, 1) if started else 0,
             },
         )
+        if self.webhook is not None:
+            self.webhook.stop()
         self.telemetry.flush()
         self.telemetry.shutdown()

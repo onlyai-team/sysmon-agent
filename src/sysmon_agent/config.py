@@ -24,7 +24,21 @@ AUTH_TYPES = (AUTH_NONE, AUTH_BEARER, AUTH_BASIC, AUTH_HEADER)
 
 LOG_FORMATS = ("json", "text")
 
-_SECRET_KEYS = ("token", "password", "header_value")
+_SECRET_KEYS = ("token", "password", "header_value",
+                "webhook_token", "webhook_password", "webhook_header_value")
+
+
+def auth_headers(auth_type: str, token: str, username: str, password: str,
+                 header_name: str, header_value: str) -> Dict[str, str]:
+    """The four supported schemes, shared by the OTLP exporters and the webhook."""
+    if auth_type == AUTH_BEARER and token:
+        return {"Authorization": "Bearer %s" % token}
+    if auth_type == AUTH_BASIC and username:
+        raw = ("%s:%s" % (username, password)).encode("utf-8")
+        return {"Authorization": "Basic %s" % base64.b64encode(raw).decode("ascii")}
+    if auth_type == AUTH_HEADER and header_name:
+        return {header_name: header_value}
+    return {}
 
 
 @dataclass
@@ -42,6 +56,15 @@ class Config:
     traces_enabled: bool = True
     trace_polls: bool = False
     heartbeat_seconds: int = 300
+    webhook_url: str = ""
+    webhook_auth_type: str = AUTH_NONE
+    webhook_token: str = ""
+    webhook_username: str = ""
+    webhook_password: str = ""
+    webhook_header_name: str = ""
+    webhook_header_value: str = ""
+    webhook_timeout_seconds: int = 10
+    webhook_verify_tls: bool = True
     session_poll_seconds: int = 5
     export_timeout_seconds: int = 15
     verify_tls: bool = True
@@ -57,14 +80,22 @@ class Config:
 
     def headers(self) -> Dict[str, str]:
         """Headers attached to every OTLP request."""
-        if self.auth_type == AUTH_BEARER and self.token:
-            return {"Authorization": "Bearer %s" % self.token}
-        if self.auth_type == AUTH_BASIC and self.username:
-            raw = ("%s:%s" % (self.username, self.password)).encode("utf-8")
-            return {"Authorization": "Basic %s" % base64.b64encode(raw).decode("ascii")}
-        if self.auth_type == AUTH_HEADER and self.header_name:
-            return {self.header_name: self.header_value}
-        return {}
+        return auth_headers(self.auth_type, self.token, self.username,
+                            self.password, self.header_name, self.header_value)
+
+    def webhook_headers(self) -> Dict[str, str]:
+        """Headers attached to every webhook POST; same schemes as OTLP."""
+        return auth_headers(self.webhook_auth_type, self.webhook_token,
+                            self.webhook_username, self.webhook_password,
+                            self.webhook_header_name, self.webhook_header_value)
+
+    def webhook_enabled(self) -> bool:
+        return bool(self.webhook_url)
+
+    def webhook_tls_verify(self) -> Any:
+        if not self.webhook_verify_tls:
+            return False
+        return self.ca_bundle or True
 
     def signal_endpoint(self, signal: str) -> str:
         """Full OTLP/HTTP URL for 'metrics' or 'logs'."""
@@ -104,6 +135,22 @@ class Config:
             raise AgentError("Session poll interval must be at least 1 second.")
         if self.heartbeat_seconds < 10:
             raise AgentError("Heartbeat interval must be at least 10 seconds.")
+        if self.webhook_url:
+            if not self.webhook_url.startswith(("http://", "https://")):
+                raise AgentError("Webhook URL must start with http:// or https:// "
+                                 "(got %r)." % self.webhook_url)
+            if self.webhook_auth_type not in AUTH_TYPES:
+                raise AgentError("Unknown webhook auth type %r; expected one of %s."
+                                 % (self.webhook_auth_type, ", ".join(AUTH_TYPES)))
+            if self.webhook_auth_type == AUTH_BEARER and not self.webhook_token:
+                raise AgentError("Webhook bearer auth selected but no token is set.")
+            if self.webhook_auth_type == AUTH_BASIC and not self.webhook_username:
+                raise AgentError("Webhook basic auth selected but no username is set.")
+            if self.webhook_auth_type == AUTH_HEADER and not self.webhook_header_name:
+                raise AgentError("Webhook custom header auth selected but no header "
+                                 "name is set.")
+            if self.webhook_timeout_seconds < 1:
+                raise AgentError("Webhook timeout must be at least 1 second.")
         if self.log_format not in LOG_FORMATS:
             raise AgentError("Unknown log format %r; expected one of %s."
                              % (self.log_format, ", ".join(LOG_FORMATS)))

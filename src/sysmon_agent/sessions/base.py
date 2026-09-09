@@ -170,6 +170,23 @@ class SessionTracker(threading.Thread):
             except Exception as exc:
                 LOG.debug("Session event hook failed: %s", exc)
 
+    def emit_event(self, event_name: str, session: Session, message: str,
+                   extra: Optional[Dict[str, Any]] = None) -> None:
+        """A session-adjacent event that is neither a login nor a logout.
+
+        RDP detach and re-attach go through here so they reach the same places
+        start and end do; the platform trackers must not log them directly.
+        """
+        attributes = session.attributes(event_name)
+        if extra:
+            attributes.update(extra)
+        EVENTS.info(message, extra=attributes)
+        if self.on_event is not None:
+            try:
+                self.on_event(event_name, session, attributes)
+            except Exception as exc:
+                LOG.debug("Session event hook failed: %s", exc)
+
     # --------------------------------------------------------------- spans
 
     def _open_span(self, session: Session, attributes: Dict[str, Any]):

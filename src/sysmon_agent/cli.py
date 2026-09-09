@@ -98,6 +98,7 @@ def build_config(args, existing: Optional[Config]) -> Config:
         if args.machine_name:
             config.machine_name = args.machine_name
         _apply_auth_flags(config, args)
+        _apply_webhook_flags(config, args)
         _apply_common_flags(config, args)
         return config
 
@@ -140,6 +141,9 @@ def build_config(args, existing: Optional[Config]) -> Config:
     config.session_poll_seconds = args.session_poll or ask_int(
         "Session poll interval, seconds", config.session_poll_seconds)
 
+    print("")
+    _prompt_webhook(config, args)
+
     if config.endpoint.startswith("https://"):
         config.verify_tls = ask_bool("Verify the collector's TLS certificate?",
                                      config.verify_tls)
@@ -147,8 +151,68 @@ def build_config(args, existing: Optional[Config]) -> Config:
             bundle = ask("Custom CA bundle path (blank to use the system store)",
                          config.ca_bundle or "")
             config.ca_bundle = bundle if bundle and bundle != "" else ""
+    _apply_webhook_flags(config, args)
     _apply_common_flags(config, args)
     return config
+
+
+def _prompt_webhook(config: Config, args) -> None:
+    """Optional: POST session enter/exit events straight to a webhook."""
+    if args.webhook_url:
+        config.webhook_url = args.webhook_url
+    else:
+        has_webhook = ask_bool(
+            "Also POST session enter/exit events to a webhook?",
+            bool(config.webhook_url))
+        if not has_webhook:
+            config.webhook_url = ""
+            return
+        config.webhook_url = ask("Webhook URL", config.webhook_url or None)
+
+    auth_type = args.webhook_auth_type or ask_choice(
+        "How does the webhook authenticate this agent?",
+        list(AUTH_TYPES),
+        config.webhook_auth_type or AUTH_NONE,
+    )
+    config.webhook_auth_type = auth_type
+    if auth_type == AUTH_BEARER:
+        config.webhook_token = args.webhook_token or ask("Bearer token", secret=True)
+    elif auth_type == AUTH_BASIC:
+        config.webhook_username = args.webhook_username or ask(
+            "Username", config.webhook_username or None)
+        config.webhook_password = args.webhook_password or ask("Password", secret=True)
+    elif auth_type == AUTH_HEADER:
+        config.webhook_header_name = args.webhook_header_name or ask(
+            "Header name", config.webhook_header_name or "X-API-Key")
+        config.webhook_header_value = args.webhook_header_value or ask(
+            "Header value", secret=True)
+    else:
+        config.webhook_token = config.webhook_password = ""
+        config.webhook_header_value = ""
+
+    config.webhook_timeout_seconds = args.webhook_timeout or ask_int(
+        "Webhook timeout, seconds", config.webhook_timeout_seconds)
+    if config.webhook_url.startswith("https://"):
+        config.webhook_verify_tls = ask_bool(
+            "Verify the webhook's TLS certificate?", config.webhook_verify_tls)
+
+
+def _apply_webhook_flags(config: Config, args) -> None:
+    for flag, field in (
+        ("webhook_url", "webhook_url"),
+        ("webhook_auth_type", "webhook_auth_type"),
+        ("webhook_token", "webhook_token"),
+        ("webhook_username", "webhook_username"),
+        ("webhook_password", "webhook_password"),
+        ("webhook_header_name", "webhook_header_name"),
+        ("webhook_header_value", "webhook_header_value"),
+        ("webhook_timeout", "webhook_timeout_seconds"),
+    ):
+        value = getattr(args, flag, None)
+        if value:
+            setattr(config, field, value)
+    if getattr(args, "webhook_no_verify_tls", False):
+        config.webhook_verify_tls = False
 
 
 def _apply_auth_flags(config: Config, args) -> None:
@@ -350,6 +414,10 @@ def cmd_status(args) -> int:
         print("  auth:     %s" % config.auth_type)
         print("  interval: %ds metrics / %ds sessions"
               % (config.metrics_interval_seconds, config.session_poll_seconds))
+        print("  traces:   %s" % ("on" if config.traces_enabled else "off"))
+        print("  webhook:  %s" % (
+            "%s (auth: %s)" % (config.webhook_url, config.webhook_auth_type)
+            if config.webhook_enabled() else "not configured"))
 
     data = snapshot()
     print("\nSystem right now")
@@ -443,12 +511,31 @@ def cmd_test(args) -> int:
     for signal, sent, detail in send_test_telemetry(config):
         print("  %-8s %-7s %s" % (signal + ":", "OK" if sent else "FAILED", detail))
         failures += 0 if sent else 1
+    if config.webhook_enabled():
+        from .webhook import send_test_webhook
+
+        sent = send_test_webhook(config, _webhook_resource(config))
+        print("  %-8s %-7s one enter event -> %s"
+              % ("webhook:", "OK" if sent else "FAILED", config.webhook_url))
+        failures += 0 if sent else 1
     if failures:
         print("\nThe collector refused the payload. The exporter logs the reason; "
               "run with a reachable endpoint or check the credentials.")
     else:
         print("\nLook for a span named 'agent.test' in your trace backend.")
     return 0 if ok and failures == 0 else 1
+
+
+def _webhook_resource(config: Config) -> dict:
+    import platform
+
+    return {
+        "service.name": SERVICE_NAME,
+        "service.version": __version__,
+        "host.name": config.machine_name,
+        "os.type": platform.system().lower(),
+        "deployment.environment": config.environment,
+    }
 
 
 def cmd_config(args) -> int:
@@ -510,6 +597,19 @@ def build_parser() -> argparse.ArgumentParser:
                               "runs; useful for debugging, noisy otherwise")
     install.add_argument("--no-per-cpu", action="store_true",
                          help="report CPU metrics for the host only, not per core")
+    install.add_argument("--webhook-url",
+                         help="POST session enter/exit events to this URL")
+    install.add_argument("--webhook-auth-type", choices=list(AUTH_TYPES),
+                         help="webhook authentication scheme")
+    install.add_argument("--webhook-token", help="webhook bearer token")
+    install.add_argument("--webhook-username", help="webhook basic auth username")
+    install.add_argument("--webhook-password", help="webhook basic auth password")
+    install.add_argument("--webhook-header-name", help="webhook auth header name")
+    install.add_argument("--webhook-header-value", help="webhook auth header value")
+    install.add_argument("--webhook-timeout", type=int,
+                         help="webhook request timeout in seconds")
+    install.add_argument("--webhook-no-verify-tls", action="store_true",
+                         help="do not verify the webhook's TLS certificate")
     install.add_argument("--ca-bundle", help="path to a custom CA bundle")
     install.add_argument("--no-verify-tls", action="store_true",
                          help="do not verify the collector's TLS certificate")
